@@ -1,0 +1,347 @@
+workingdir = "" # set working directory before running the script
+
+options(echo=TRUE) # if you want to see commands in output file
+
+args = commandArgs(trailingOnly=T)
+rat = as.numeric(args[1])
+rat
+ind = as.numeric(args[2])
+ind
+
+Rcpp::sourceCpp(paste0(workingdir,"/functions/L12proj.cpp"))
+Rcpp::sourceCpp(paste0(workingdir,"/functions/SPG_lasso.cpp"))
+Rcpp::sourceCpp(paste0(workingdir,"/functions/SPG_glasso.cpp"))
+Rcpp::sourceCpp(paste0(workingdir,"/functions/SPG_gbridge.cpp"))
+R.files = list.files(path=paste0(workingdir,"/functions"),pattern="*.R",full.names=T)
+sapply(R.files,source,.GlobalEnv)
+
+# wavelet parameters
+family = "DaubLeAsymm"
+fil.num = 4
+level = 3
+
+# data generation, 3 groups
+dims=c(64,64)
+p = prod(dims)
+sizes=c(200,200,200)
+total = sum(sizes)
+cumsize = c(0,cumsum(sizes))
+ngroup = length(sizes)
+
+# generate coefficient images
+u = seq(0,1,length.out=(dims[1]+1))[-1]
+v = seq(0,1,length.out=(dims[2]+1))[-1]
+# group 1
+beta1.0 = matrix(rep(0,prod(dims)),dims[1],dims[2])
+for(a in 1:dims[1]){
+  for(b in 1:dims[2]){
+    if(u[a]>=(4*pi/80) & u[a]<=(14*pi/80) & v[b]>=(4*pi/80) & v[b]<=(14*pi/80)){
+      beta1.0[a,b] = 3/5
+    }
+    if(u[a]>=(14*pi/80) & u[a]<=(24*pi/80) & v[b]>=(14*pi/80) & v[b]<=(24*pi/80)){
+      beta1.0[a,b] = 1
+    }
+  }
+}
+
+# group 2
+beta2.0 = matrix(rep(0,prod(dims)),dims[1],dims[2])
+for(a in 1:dims[1]){
+  for(b in 1:dims[2]){
+    if(u[a]>=(9*pi/160) & u[a]<=(27*pi/160) & v[b]>=(9*pi/160) & v[b]<=(27*pi/160)){
+      beta2.0[a,b] = 1
+    }
+    if(u[a]>=(29*pi/160) & u[a]<=(47*pi/160) & v[b]>=(29*pi/160) & v[b]<=(47*pi/160)){
+      beta2.0[a,b] = 1/2
+    }
+  }
+}
+
+# group 3
+beta3.0 = matrix(rep(0,prod(dims)),dims[1],dims[2])
+for(a in 1:dims[1]){
+  for(b in 1:dims[2]){
+    if(u[a]>=(5*pi/80) & u[a]<=(13*pi/80) & v[b]>=(5*pi/80) & v[b]<=(13*pi/80)){
+      beta3.0[a,b] = 4/3
+    }
+    if(u[a]>=(15*pi/80) & u[a]<=(23*pi/80) & v[b]>=(15*pi/80) & v[b]<=(23*pi/80)){
+      beta3.0[a,b] = 4/5
+    }
+  }
+}
+
+mask = which(c(decomp.2D(list(beta1.0),min.level=level))!=0)
+
+X = list()
+W = list()
+for(m in 1:ngroup){
+  for(i in (cumsize[m]+1):cumsize[(m+1)]){
+    a = rnorm(prod(dims),0,1)
+    noise = rep(0,p)
+    if(rat!=0){
+      noise[mask] = rnorm(length(mask), 0, 1/sqrt(rat))
+    }
+    a.star = a + noise
+    X[[i]] = reconstr.2D(a,dims=dims,min.level=level,family=family,fil.num=fil.num)
+    W[[i]] = reconstr.2D(a.star,dims=dims,min.level=level,family=family,fil.num=fil.num)
+  }
+}
+var.u = rep(0,p)
+if(rat!=0){
+  var.u[mask] = 1/rat
+}
+Sigma = diag(var.u)
+
+g1 = sapply(X[(cumsize[1]+1):cumsize[2]],function(x) sum(c(x*beta1.0)))
+g2 = sapply(X[(cumsize[2]+1):cumsize[3]],function(x) sum(c(x*beta2.0)))
+g3 = sapply(X[(cumsize[3]+1):cumsize[4]],function(x) sum(c(x*beta3.0)))
+g = c(g1,g2,g3)
+sigma2 = var(g)/9
+Y = g + rnorm(total,0,sqrt(sigma2))
+
+########################
+# generate testing data
+########################
+X.test = list()
+W.test = list()
+for(m in 1:ngroup){
+  for(i in (cumsize[m]+1):cumsize[(m+1)]){
+    a = rnorm(prod(dims),0,1)
+    noise = rep(0,p)
+    if(rat!=0){
+      noise[mask] = rnorm(length(mask), 0, 1/sqrt(rat))
+    }
+    a.star = a + noise
+    X.test[[i]] = reconstr.2D(a,dims=dims,min.level=level,family=family,fil.num=fil.num)
+    W.test[[i]] = reconstr.2D(a.star,dims=dims,min.level=level,family=family,fil.num=fil.num)
+  }
+}
+
+g1.test = sapply(X.test[(cumsize[1]+1):cumsize[2]],function(x) sum(c(x*beta1.0)))
+g2.test = sapply(X.test[(cumsize[2]+1):cumsize[3]],function(x) sum(c(x*beta2.0)))
+g3.test = sapply(X.test[(cumsize[3]+1):cumsize[4]],function(x) sum(c(x*beta3.0)))
+g.test = c(g1.test,g2.test,g3.test)
+# sigma2 = var(g)/9
+Y.test = g.test + rnorm(total,0,sqrt(sigma2)) # use the same sigma2 as training data
+var.y = rep(NA,ngroup)
+for(k in 1:ngroup){
+  var.y[k] = var(Y.test[(cumsize[k]+1):cumsize[(k+1)]])
+}
+
+
+
+###########
+# WNET
+###########
+library(refund.wave)
+library(abind)
+beta.wnet = list()
+pred.wnet = list()
+pmse.wnet = rep(NA,ngroup)
+for(k in 1:ngroup){
+  fit.wnet = wnet(Y[(cumsize[k]+1):cumsize[(k+1)]],abind(W[(cumsize[k]+1):cumsize[(k+1)]],along=0),
+                  min.scale=level,wavelet.family=family,filter.number=fil.num,alpha=c(0.1,0.4,0.7,1))
+  print(fit.wnet$tuning.param)
+  beta.wnet[[k]] = fit.wnet$fhat
+  pred.wnet[[k]] = sapply(W.test[(cumsize[k]+1):cumsize[(k+1)]],
+                          function(x) sum(c(x*beta.wnet[[k]]))+fit.wnet$coef.params[1])
+  pmse.wnet[k] = mean((Y.test[(cumsize[k]+1):cumsize[(k+1)]]-pred.wnet[[k]])^2)/var.y[k]
+}
+pmse.wnet
+
+
+
+###########
+# WPCR
+###########
+beta.wpcr = list()
+pred.wpcr = list()
+pmse.wpcr = rep(NA,ngroup)
+for(k in 1:ngroup){
+  fit.wpcr = wcr(Y[(cumsize[k]+1):cumsize[(k+1)]],abind(W[(cumsize[k]+1):cumsize[(k+1)]],along=0),
+                 min.scale=level,filter.number=fil.num,wavelet.family=family,
+                 nfeatures=200,ncomp=1:20,method='pcr')
+  beta.wpcr[[k]] = fit.wpcr$fhat
+  pred.wpcr[[k]] = sapply(W.test[(cumsize[k]+1):cumsize[(k+1)]],
+                          function(x) sum(c(x*beta.wpcr[[k]]))+fit.wpcr$param.coef[1])
+  pmse.wpcr[k] = mean((Y.test[(cumsize[k]+1):cumsize[(k+1)]]-pred.wpcr[[k]])^2)/var.y[k]
+}
+pmse.wpcr
+
+
+
+
+
+
+
+###############################
+# glasso w/o noise correction
+###############################
+library(grpreg)
+library(Matrix)
+C1 = decomp.2D(W[(cumsize[1]+1):cumsize[2]],min.level=level,family=family,fil.num=fil.num)
+C2 = decomp.2D(W[(cumsize[2]+1):cumsize[3]],min.level=level,family=family,fil.num=fil.num)
+C3 = decomp.2D(W[(cumsize[3]+1):cumsize[4]],min.level=level,family=family,fil.num=fil.num)
+C = as.matrix(bdiag(C1,C2,C3))
+cv.fit.grp = cv.grpreg(C,Y,group=rep(1:prod(dims),3),penalty='grLasso',nfolds=5)
+fit.grp = grpreg(C,Y,group=rep(1:prod(dims),3),penalty='grLasso',lambda=cv.fit.grp$lambda.min)
+beta.glasso = list()
+pred.glasso = list()
+pmse.glasso = rep(NA,ngroup)
+for(k in 1:ngroup){
+  beta.glasso[[k]] = reconstr.2D(fit.grp$beta[(2+(k-1)*prod(dims)):(k*prod(dims)+1)],dims=dims,min.level=level,family=family,fil.num=fil.num)
+  pred.glasso[[k]] = sapply(W.test[(cumsize[k]+1):cumsize[(k+1)]],function(x) sum(c(x*beta.glasso[[k]]))+fit.grp$beta[1])
+  pmse.glasso[k] = mean((Y.test[(cumsize[k]+1):cumsize[(k+1)]]-pred.glasso[[k]])^2)/var.y[k]
+}
+
+pmse.glasso
+
+lam0 = cv.fit.grp$lambda.min
+lam0
+
+
+######################################
+# la4 w/o noise correction
+######################################
+# several rounds of CV to find optimal params
+cv.fit1 = cv.multiSOS(W,Y,family=family,fil.num=fil.num,sizes=sizes,
+                      levels=level,lams=lam0*c(0.001,0.01,0.1,1))
+cv.fit1$best.lam
+cv.fit2 = cv.multiSOS(W,Y,family=family,fil.num=fil.num,sizes=sizes,
+                      levels=level,lams=cv.fit1$best.lam*c(0.2,0.5,1,2,5))
+cv.fit2$best.lam
+cv.fit3 = cv.multiSOS(W,Y,family=family,fil.num=fil.num,sizes=sizes,
+                      levels=level,lams=cv.fit2$best.lam*c(1/3,1/2,1,2,3))
+cv.fit3$best.lam
+fit.gbridge = multiSOS(W,Y,family=family,fil.num=fil.num,
+                       min.level=level,sizes=sizes,
+                       lam=cv.fit3$best.lam)
+
+beta.gbridge = list()
+pred.gbridge = list()
+pmse.gbridge = rep(NA,ngroup)
+for(k in 1:ngroup){
+  beta.gbridge[[k]] = fit.gbridge$beta[[k]]
+  pred.gbridge[[k]] = sapply(W.test[(cumsize[k]+1):cumsize[(k+1)]],function(x) sum(c(x*beta.gbridge[[k]]))+fit.gbridge$beta0[k])
+  pmse.gbridge[k] = mean((Y.test[(cumsize[k]+1):cumsize[(k+1)]]-pred.gbridge[[k]])^2)/var.y[k]
+}
+pmse.gbridge
+
+
+###################
+# noisy lasso
+###################
+beta.noisy.lasso = list()
+pred.noisy.lasso = list()
+pmse.noisy.lasso = rep(NA,ngroup)
+for(k in 1:ngroup){
+  cat("noisy lasso group",k,"\n")
+  cv.fit1 = cv.noisy_lasso(X=W[(cumsize[k]+1):cumsize[(k+1)]], Y=Y[(cumsize[k]+1):cumsize[(k+1)]],
+                           Sigma=Sigma, zvec=c(1e3), lamvec = lam0*c(0.001,0.01,0.1,1,10),
+                           family=family,fil.num=fil.num, min.level=level)
+  cat(cv.fit1$best.lam,"\n")
+  cv.fit2 = cv.noisy_lasso(X=W[(cumsize[k]+1):cumsize[(k+1)]], Y=Y[(cumsize[k]+1):cumsize[(k+1)]],
+                           Sigma=Sigma, zvec=c(1e3), lamvec = cv.fit1$best.lam*c(0.2,0.5,1,2,5),
+                           family=family,fil.num=fil.num, min.level=level)
+  cat(cv.fit2$best.lam,"\n")
+  cv.fit3 = cv.noisy_lasso(X=W[(cumsize[k]+1):cumsize[(k+1)]], Y=Y[(cumsize[k]+1):cumsize[(k+1)]],
+                           Sigma=Sigma, zvec=c(1e3), lamvec = cv.fit2$best.lam*c(1/3,1/2,1,2,3),
+                           family=family,fil.num=fil.num, min.level=level)
+  cat(cv.fit3$best.lam,"\n")
+  fit.noisy.lasso = noisy_lasso(X=W[(cumsize[k]+1):cumsize[(k+1)]], Y=Y[(cumsize[k]+1):cumsize[(k+1)]],
+                                Sigma=Sigma, z=1e3, lambda0=cv.fit3$best.lam,
+                                family=family,fil.num=fil.num, min.level=level)
+  beta.noisy.lasso[[k]] = fit.noisy.lasso$beta
+  pred.noisy.lasso[[k]] = sapply(W.test[(cumsize[k]+1):cumsize[(k+1)]],
+                                 function(x) sum(c(x*beta.noisy.lasso[[k]]))+fit.noisy.lasso$beta0)
+  pmse.noisy.lasso[k] = mean((Y.test[(cumsize[k]+1):cumsize[(k+1)]]-pred.noisy.lasso[[k]])^2)/var.y[k]
+}
+pmse.noisy.lasso
+
+
+##########################
+# noisy glasso
+##########################
+cv.fit1 = cv.noisy_groupreg(X=W, Y=Y, Sigma=Sigma, sizes=sizes, zvec=c(1e3),
+                            lamvec = lam0*c(0.001,0.01,0.1,1,10),
+                            method="glasso",
+                            family=family,fil.num=fil.num, min.level=level)
+cv.fit1$best.lam
+cv.fit2 = cv.noisy_groupreg(X=W, Y=Y, Sigma=Sigma, sizes=sizes, zvec=c(1e3),
+                            lamvec = cv.fit1$best.lam*c(0.2,0.5,1,2,5),
+                            method="glasso",
+                            family=family,fil.num=fil.num, min.level=level)
+cv.fit2$best.lam
+cv.fit3 = cv.noisy_groupreg(X=W, Y=Y, Sigma=Sigma, sizes=sizes, zvec=c(1e3),
+                            lamvec = cv.fit2$best.lam*c(1/3,1/2,1,2,3),
+                            method="glasso",
+                            family=family,fil.num=fil.num, min.level=level)
+cv.fit3$best.lam
+lam1 = cv.fit3$best.lam
+
+fit.noisy.glasso = noisy_groupreg(X=W, Y=Y, Sigma=Sigma, sizes=sizes, z=1e3,
+                                  lambda0=cv.fit3$best.lam,
+                                  method="glasso",
+                                  family=family,fil.num=fil.num, min.level=level)
+
+beta.noisy.glasso = list()
+pred.noisy.glasso = list()
+pmse.noisy.glasso = rep(NA,ngroup)
+for(k in 1:ngroup){
+  beta.noisy.glasso[[k]] = fit.noisy.glasso$beta[[k]]
+  pred.noisy.glasso[[k]] = sapply(W.test[(cumsize[k]+1):cumsize[(k+1)]],
+                                  function(x) sum(c(x*beta.noisy.glasso[[k]]))+fit.noisy.glasso$beta0[k])
+  pmse.noisy.glasso[k] = mean((Y.test[(cumsize[k]+1):cumsize[(k+1)]]-pred.noisy.glasso[[k]])^2)/var.y[k]
+}
+pmse.noisy.glasso
+
+
+
+
+##########################
+# noisy gbridge
+##########################
+cv.fit1 = cv.noisy_groupreg(X=W, Y=Y, Sigma=Sigma, sizes=sizes, zvec=c(1e3),
+                            lamvec = lam0*c(0.001,0.01,0.1,1,10),
+                            init=fit.noisy.glasso$beta,
+                            method="gbridge", maxiter=10, tol0=1e-2,
+                            family=family,fil.num=fil.num, min.level=level)
+cv.fit1$best.lam
+cv.fit2 = cv.noisy_groupreg(X=W, Y=Y, Sigma=Sigma, sizes=sizes, zvec=c(1e3),
+                            lamvec = cv.fit1$best.lam*c(0.2,0.5,1,2,5),
+                            init=fit.noisy.glasso$beta,
+                            method="gbridge", maxiter=10, tol0=1e-2,
+                            family=family,fil.num=fil.num, min.level=level)
+cv.fit2$best.lam
+cv.fit3 = cv.noisy_groupreg(X=W, Y=Y, Sigma=Sigma, sizes=sizes, zvec=c(1e3),
+                            lamvec = cv.fit2$best.lam*c(1/3,1/2,1,2,3),
+                            init=fit.noisy.glasso$beta,
+                            method="gbridge", maxiter=10, tol0=1e-2,
+                            family=family,fil.num=fil.num, min.level=level)
+cv.fit3$best.lam
+fit.noisy.gbridge = noisy_groupreg(X=W, Y=Y, Sigma=Sigma, sizes=sizes, z=1e3,
+                                   lambda0=cv.fit3$best.lam,
+                                   init=fit.noisy.glasso$beta,
+                                   method="gbridge", maxiter=20, tol0=1e-2,
+                                   family=family,fil.num=fil.num, min.level=level)
+
+beta.noisy.gbridge = list()
+pred.noisy.gbridge = list()
+pmse.noisy.gbridge = rep(NA,ngroup)
+for(k in 1:ngroup){
+  beta.noisy.gbridge[[k]] = fit.noisy.gbridge$beta[[k]]
+  pred.noisy.gbridge[[k]] = sapply(W.test[(cumsize[k]+1):cumsize[(k+1)]],
+                                   function(x) sum(c(x*beta.noisy.gbridge[[k]]))+fit.noisy.gbridge$beta0[k])
+  pmse.noisy.gbridge[k] = mean((Y.test[(cumsize[k]+1):cumsize[(k+1)]]-pred.noisy.gbridge[[k]])^2)/var.y[k]
+}
+pmse.noisy.gbridge
+
+
+save(beta.wnet,          pmse.wnet,
+     beta.wpcr,          pmse.wpcr,
+     beta.glasso,        pmse.glasso,
+     beta.gbridge,       pmse.gbridge,
+     beta.noisy.lasso,   pmse.noisy.lasso,
+     beta.noisy.glasso,  pmse.noisy.glasso,
+     beta.noisy.gbridge, pmse.noisy.gbridge,
+     file=paste0(workingdir,"/results/sim2d_square_error",rat,"_rep",ind,".Rdata"))
